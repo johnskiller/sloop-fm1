@@ -80,7 +80,7 @@ static void draw_head(void)
         cv_icon(156, 2, ICON_TAPE, C_GRAY);
         b[0] = (char)('1' + song.sel);
         b[1] = 0;
-        cv_rect(168, 2, 12, 16, TE_COL[song.sel & 3u]);
+        cv_rect(168, 2, 12, 16, TE_COL[song.sel % NTRK]);
         cv_text(170, 1, &FONT_S, b, C_BLACK);
     } else {
         b[0] = 'T';
@@ -238,51 +238,109 @@ static void graph_steps(const track_t *t, uint16_t c)
             cv_rect(x - 1, y + 16, 3, 3, C_WHITE);
     }
 }
-/* STEP page: the cursor's 16-step bank as a little piano roll */
+/* STEP page: the cursor's 16-step bank as a piano roll, chords and all. A keyboard on the left (each
+ * C named), 18 rows of 4 px (an octave and a half) that follow the cursor's chord: they move only when
+ * it leaves them. A note above or below the window: a triangle over / under its step, a dot a note.
+ * Under the grid each step's velocity and ratchet; the playhead and the cursor under its column. */
+#define ROLL_ROWS 18
+#define ROLL_Y 7                                     /* the top row */
+#define ROLL_H (ROLL_ROWS * 4)
+#define ROLL_X 28                                    /* the first step column (13 px each) */
+static int32_t roll_lo = 48;
+static void roll_more(int32_t x, int32_t y, int32_t up, uint32_t k, uint16_t c)
+{
+    uint32_t m;
+    cv_rect(x + 2, up ? y : y + 2, 1, 1, c);
+    cv_rect(x + 1, y + 1, 3, 1, c);
+    cv_rect(x, up ? y + 2 : y, 5, 1, c);
+    for (m = 0; m < k && m < 4u; m++)
+        cv_rect(x + 6 + (int32_t)m * 2, y + 1, 1, 2, c);
+}
 static void graph_roll(const track_t *t, uint16_t c)
 {
-    uint32_t i, j, len = (uint32_t)t->p[P_SLEN], base = ui.bank * 16u;
-    int32_t lo = 127, hi = 0, prev_y = -1;
-    for (i = 0; i < len; i++)
-        for (j = 0; j < t->step[i].n; j++) {
-            if (t->step[i].note[j] < lo)
-                lo = t->step[i].note[j];
-            if (t->step[i].note[j] > hi)
-                hi = t->step[i].note[j];
+    static const uint8_t BLK[12] = {0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0};
+    uint32_t i, j, len = (uint32_t)t->p[P_SLEN], base = ui.bank * 16u, s = ui.cursor;
+    const step_t *prev = 0;
+    int32_t hi;
+    while (s && s < len && t->step[s].time == ST_TIE)  /* a tie: the chord it holds */
+        s--;
+    if (s < len && step_on(&t->step[s])) {           /* the cursor's chord out of the window: centre it */
+        int32_t mn = 127, mx = 0;
+        for (j = 0; j < t->step[s].n; j++) {
+            mn = t->step[s].note[j] < mn ? t->step[s].note[j] : mn;
+            mx = t->step[s].note[j] > mx ? t->step[s].note[j] : mx;
         }
-    if (lo > hi) {
-        lo = 48;
-        hi = 72;
+        if (mn < roll_lo || mx > roll_lo + ROLL_ROWS - 1)
+            roll_lo = mx - mn > ROLL_ROWS - 1 ? mn : (mn + mx) / 2 - ROLL_ROWS / 2 + 1;
     }
-    if (hi - lo < 12)
-        hi = lo + 12;
+    roll_lo = roll_lo < 0 ? 0 : roll_lo > 128 - ROLL_ROWS ? 128 - ROLL_ROWS : roll_lo;
+    hi = roll_lo + ROLL_ROWS - 1;
+    for (j = 0; j < ROLL_ROWS; j++) {                /* the keyboard; each C named, a rule across */
+        int32_t n = roll_lo + (int32_t)j, y = ROLL_Y + (ROLL_ROWS - 1 - (int32_t)j) * 4;
+        if (BLK[n % 12])
+            cv_rect(17, y, 6, 3, TE_G2);             /* a black key, short */
+        else
+            cv_rect(17, y, 9, 3, C_WHITE);
+        if (n % 12 == 0) {
+            char lb[5];
+            note_name(lb, (uint32_t)n);
+            cv_text(0, y - 6, &FONT_S, lb, C_GRAY);
+            cv_rect(ROLL_X, y + 3, 16 * 13, 1, C_LINE);
+        }
+    }
     for (i = 0; i < 16u; i++) {
-        uint32_t si = base + i;
+        uint32_t si = base + i, up = 0, dn = 0, r, rmax = 0;
         const step_t *st = &t->step[si];
-        int32_t x = (int32_t)i * 15, yb = 86;
+        int32_t x = ROLL_X + (int32_t)i * 13, vh;
         if (si >= len)
             break;
+        if (si == ui.cursor)                         /* the cursor's column lit, a bar under it */
+            cv_rect(x, ROLL_Y, 12, ROLL_H, TE_G2);
+        else if (!(i & 3u))
+            cv_rect(x, ROLL_Y, 12, ROLL_H, TE_G1);   /* each beat */
         if (si == ui.cursor)
-            cv_rect(x + 5, 92, 3, 3, C_WHITE);
+            cv_rect(x, 98, 12, 2, C_WHITE);
         if (song.playing && si == t->seq_idx)
-            cv_rect(x + 1, 97, 12, 1, C_WHITE);
-        if (st->time == ST_TIE && prev_y >= 0) {
-            cv_rect(x, prev_y, 14, 1, C_GRAY);
+            cv_rect(x, ROLL_Y + ROLL_H + 5, 12, 2, C_WHITE);   /* the playhead */
+        if (st->time == ST_TIE && prev) {            /* the held chord goes on */
+            st = prev;
+        } else if (!step_on(st)) {
+            prev = 0;
             continue;
-        }
-        if (!step_on(st)) {
-            cv_rect(x + 6, yb, 2, 1, C_DIM);
-            prev_y = -1;
-            continue;
+        } else {
+            prev = st;
         }
         for (j = 0; j < st->n; j++) {
-            int32_t y = 80 - (st->note[j] - lo) * 74 / (hi - lo);
-            cv_rect(x + 2, y, 10, 1, (st->flags & SF_ACCENT) ? C_WHITE : c);
-            if (j == 0)
-                prev_y = y;
+            int32_t nt = st->note[j];
+            if (nt > hi) {
+                up++;
+            } else if (nt < roll_lo) {
+                dn++;
+            } else {
+                int32_t y = ROLL_Y + (hi - nt) * 4;
+                if (st != &t->step[si])
+                    cv_rect(x - 1, y, 14, 3, C_GRAY);   /* tied */
+                else
+                    cv_rect(x, y, 12, 3, (st->flags & SF_ACCENT) ? C_WHITE : c);
+            }
         }
-        if (st->flags & SF_SLIDE)
-            cv_line(x + 11, prev_y, x + 17, prev_y + 2, c);
+        if (up)
+            roll_more(x, 0, 1, up, C_HI);
+        if (dn)
+            roll_more(x, ROLL_Y + ROLL_H + 1, 0, dn, C_HI);
+        if (st != &t->step[si])
+            continue;
+        if (st->flags & SF_SLIDE && st->note[0] >= roll_lo && st->note[0] <= hi) {
+            int32_t y = ROLL_Y + (hi - st->note[0]) * 4 + 1;
+            cv_line(x + 11, y, x + 14, y + 2, c);
+        }
+        vh = (st->vel ? st->vel : 96) * 9 / 127;     /* the lane: velocity, ratchet dots */
+        cv_rect(x + 1, 96 - vh, 4, vh + 1, (st->flags & SF_ACCENT) ? C_WHITE : c);
+        for (j = 0; j < st->n; j++)
+            if ((r = (st->rat >> (2u * j)) & 3u) > rmax)
+                rmax = r;
+        for (r = 0; rmax && r <= rmax; r++)
+            cv_rect(x + 7, 95 - (int32_t)r * 3, 2, 2, C_WHITE);
     }
 }
 static void graph_scale(const track_t *t, uint16_t c)
@@ -339,6 +397,7 @@ static uint32_t steps_hash(const track_t *t)
         const step_t *st = &t->step[i];
         h = (h ^ (st->note[0] + st->n * 128u + st->time * 1024u + st->flags * 4096u + st->note[1] * 65536u)) *
             16777619u;
+        h = (h ^ (st->note[2] + st->note[3] * 256u)) * 16777619u;   /* (a chord's upper notes) */
     }
     return h;
 }
@@ -488,15 +547,22 @@ static void trk_short_name(uint32_t c, char *b)      /* the track's sound, b hol
 
 static void draw_tracks(void)
 {
-    uint32_t c;
+    static uint32_t shown = 0xFFu;
+    uint32_t c, first = song.sel & ~3u;               /* four columns: the bank with the selected track */
+    if (first != shown) {
+        shown = first;
+        for (c = 0; c < NTRK; c++)
+            ts.head[c] = ts.name[c] = ts.fader[c] = ts.ov[c] = ts.mark[c] = 0;   /* (0: drawn again) */
+        lcd_fill(0, Y_GRAPH, 240, H_GRAPH, C_BLACK);
+    }
     if (ui.force) {
         lcd_fill(0, Y_GRAPH, 240, H_GRAPH, C_BLACK);
         for (c = 0; c < NTRK; c++)
             ts.meter[c] = 0;
     }
-    for (c = 0; c < NTRK; c++) {
+    for (c = first; c < first + 4u; c++) {
         track_t *t = &trk[c];
-        uint32_t x0 = c * 60u + 4u, sel = c == song.sel, lvl = trk_level(c), mute = !lvl || t->p[P_MUTE];
+        uint32_t x0 = (c - first) * 60u + 4u, sel = c == song.sel, lvl = trk_level(c), mute = !lvl || t->p[P_MUTE];
         uint32_t arm = (song.rec >> c) & 1u, st = arm ? (song.playing ? 1u : 2u) : mute ? 3u : 0u, sig;
         uint32_t len = t->p[P_SLEN] > 0 ? (uint32_t)t->p[P_SLEN] : 1u, row = 0xFFFFu;
         int32_t pk, m;
@@ -631,7 +697,7 @@ static void draw_graph(void)
 {
     const page_t *pg = cur_page();
     const track_t *t = TSEL;
-    uint16_t c = TE_COL[song.sel & 3u];               /* LIVE: the curves in the track's colour */
+    uint16_t c = TE_COL[song.sel % NTRK];               /* LIVE: the curves in the track's colour */
     uint32_t sig, top, drum_note = !ui.home && is_drum(t) && !page_for_drum(pg);
     if (!ui.home && pg->graph == GR_TRK) {
         draw_tracks();
@@ -762,7 +828,7 @@ static void draw_foot(void)
             if (si >= (uint32_t)t->p[P_SLEN])
                 continue;
             if (step_on(st))
-                cv_rect(sx, 2, 2, 9, TE_COL[song.sel & 3u]);
+                cv_rect(sx, 2, 2, 9, TE_COL[song.sel % NTRK]);
             else
                 cv_rect(sx, 10, 1, 1, C_DIM);
             if ((song.playing && si == t->seq_idx) || (song.seq_mode && si == ui.cursor))
@@ -810,7 +876,7 @@ static void draw_columns(void)
         const track_t *t = TSEL;
         uint32_t lvl = trk_level(song.sel);
         fmt_int(val, (int32_t)song.sel + 1);
-        draw_column(0, "TRACK", val, "/4", VAL(0u), (int32_t)song.sel * 1000 / (NTRK - 1), ICON_AUTO);
+        draw_column(0, "TRACK", val, "/8", VAL(0u), (int32_t)song.sel * 1000 / (NTRK - 1), ICON_AUTO);
         if (!lvl || t->p[P_MUTE]) {                    /* (MUTE: a turn of KNOB 2 unmutes, tracks_edit) */
             str_cpy(val, "MUTE", 12);
             unit = "";
@@ -853,12 +919,8 @@ static void draw_columns(void)
         const step_t *st = &TSEL->step[ui.cursor];
         char u[8];
         if (st->n) {
-            note_name(val, st->note[0]);
+            chord_name(val, st->note, st->n);         /* "C4", "Am7", "C4+2" */
             u[0] = 0;
-            if (st->n > 1) {
-                str_cpy(u, "+", 8);
-                fmt_int(u + 1, st->n - 1);
-            }
         } else {
             str_cpy(val, "--", 12);
             u[0] = 0;

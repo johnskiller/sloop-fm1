@@ -123,12 +123,33 @@ int main(int argc, char **argv)
                 }
             }
     }
+    {   /* a step's chord by name (ui.c chord_name): every inversion named by its root */
+        static const struct { uint8_t n, note[4]; const char *name; } CN[] = {
+            {1, {60}, "C4"}, {3, {60, 64, 67}, "C"}, {3, {64, 67, 72}, "C"}, {3, {55, 60, 64}, "C"},
+            {3, {57, 60, 64}, "Am"}, {3, {59, 62, 65}, "Bdim"}, {3, {60, 64, 68}, "Caug"},
+            {3, {62, 64, 69}, "Dsus2"}, {3, {62, 67, 69}, "Dsus4"}, {2, {40, 47}, "E5"},
+            {4, {55, 59, 62, 65}, "G7"}, {4, {65, 69, 72, 76}, "Fmaj7"}, {4, {66, 69, 73, 76}, "F#m7"},
+            {4, {59, 62, 65, 69}, "Bm7b5"}, {4, {64, 67, 71, 72}, "Cmaj7"}, {4, {60, 72, 64, 67}, "C"},
+            {3, {60, 61, 62}, "C4+2"}, {2, {48, 60}, "C3+1"},
+        };
+        char b[8];
+        int ok = 1;
+        for (i = 0; i < sizeof CN / sizeof CN[0]; i++) {
+            chord_name(b, CN[i].note, CN[i].n);
+            if (strcmp(b, CN[i].name)) {
+                printf("ui: chord %u: %s, not %s\n", i, b, CN[i].name);
+                ok = 0;
+            }
+        }
+        check(ok, "chord names: triads, sus, 5, sevenths, inversions, unknown");
+    }
     panel = PANEL_DEFAULT;
     layers_init();
     settings.palette = 4;
     palette_set(4);
     host_tracks_init();
-    for (i = 0; i < NPART; i++) { set_engine_of(&trk[i], TRK_DEF[i][0]); apply_preset_to(&trk[i], TRK_DEF[i][1]); trk[i].engine = trk[i].eng_req; }
+    for (i = 0; i < NTRK; i++)
+        if (trk_is_part(i)) { set_engine_of(&trk[i], TRK_DEF[i][0]); apply_preset_to(&trk[i], TRK_DEF[i][1]); trk[i].engine = trk[i].eng_req; }
     TDRUM->p[P_E0] = DRUM_DEFAULT_KIT;
     sloop_splash(); ppm("page-splash");
     ui.menu = 2; ui.force = 1; frame(); ppm("page-about"); ui.menu = 0;
@@ -137,6 +158,28 @@ int main(int argc, char **argv)
     open_family(FAM_EDIT); ui.force = 1; frame(); ppm("page-edit");
     open_family(FAM_FX); ui.force = 1; frame(); ppm("page-fx");
     open_family(FAM_SEQ); ui.force = 1; frame(); ppm("page-step");
+    {   /* the roll: chords, a tie, a note above the window; the cursor's chord named */
+        static const uint8_t CHD[4][4] = {{60, 64, 67, 71}, {57, 60, 64, 0}, {65, 69, 72, 0}, {55, 59, 62, 96}};
+        track_t *t = TSEL;
+        step_t keep[16];
+        uint32_t s;
+        memcpy(keep, t->step, sizeof keep);
+        for (s = 0; s < 16u; s++) {
+            const uint8_t *c = CHD[s / 4u];
+            step_t *st = &t->step[s];
+            st->time = (s & 1u) ? ST_TIE : ST_NOTE;
+            st->n = c[3] ? 4 : 3;
+            memcpy(st->note, c, 4);
+        }
+        ui.cursor = 4; ui.bank = 0; ui.force = 1; frame(); ppm("page-roll");
+        check(roll_lo <= 57 && roll_lo + ROLL_ROWS - 1 >= 64, "roll: the cursor's chord inside the window");
+        ui.cursor = 9; ui.force = 1; frame();             /* a tie: the F above it, out of 48..71 */
+        check(roll_lo <= 65 && roll_lo + ROLL_ROWS - 1 >= 72, "roll: a chord out of the window moves it");
+        ui.cursor = 12; ui.force = 1; frame();
+        check(roll_lo <= 55 && roll_lo + ROLL_ROWS - 1 >= 62, "roll: the window keeps the low notes when one is far above");
+        memcpy(t->step, keep, sizeof keep);
+        ui.cursor = 0; ui.force = 1; frame();
+    }
     open_family(FAM_GLO); ui.force = 1; frame(); ppm("page-global");
     open_family(FAM_GLO); ui.force = 1; frame(); ppm("page-master");
     open_family(FAM_SCL); ui.force = 1; frame(); ppm("page-scale");
@@ -191,30 +234,52 @@ int main(int argc, char **argv)
     ui.menu = 0; ui.force = 1; frames(2);
     song.g[G_DUST] = 0; song.g[G_FILT] = 0;
 
-    /* ---- SEQ layer: drum steps on the white keys */
-    song.sel = TRK_DRUM; go_home(); frame();
-    key(4);                                          /* A3: the snare, played: the layer's sound */
-    check(pen_lane == 2, "a drum key played: the SEQ layer's sound (snare)");
-    press(B_SEQ); frames(10);
-    key(0); key(7); key(14);                          /* steps 1, 5, 9 */
+    /* ---- the drum track, STEP (the default, no layer): white keys the steps of the sound picked, black 1..8
+     * pick a sound of the section (OCT- / OCT+), 9 / 10 the page, 11 the sound out of the pattern */
+    song.sel = TRK_DRUM; drum_mode = DM_STEP; drum_section = 0; ui.step_page = 0; go_home(); frame();
+    key(5);                                          /* A#3, black key 3: the snare */
+    check(pen_lane == 2, "STEP: black key 3 picks the snare");
+    key(0); key(7); key(14);                          /* white keys 1, 5, 9 */
     check(dstep_has(&TDRUM->dstep[0], 2) && dstep_has(&TDRUM->dstep[4], 2) && dstep_has(&TDRUM->dstep[8], 2) &&
-          !dstep_has(&TDRUM->dstep[1], 2), "SEQ + white keys 1, 5, 9: snare steps");
-    ppm("layer-steps");
+          !dstep_has(&TDRUM->dstep[1], 2) && ui.layer == LY_PLAY, "STEP: white keys 1, 5, 9: snare steps, no layer");
+    check((keys_lit() >> key_of_white(4) & 1u) && (keys_lit() >> 5 & 1u) && !(keys_lit() >> key_of_white(1) & 1u),
+          "STEP LEDs: the snare's steps, its black key");
     fm1_in.notes = 1u << 7; frame();                  /* step 5 held + KNOB 2 / 3: level, ratchet */
     encs[panel.enc[EN_K2]] = 1; frame();
     encs[panel.enc[EN_K3]] = 2; frame();
     fm1_in.notes = 0; frame();
     check(dstep_lvl(&TDRUM->dstep[4], 2) == LV_HARD && dstep_rat(&TDRUM->dstep[4], 2) == 2u,
-          "step 5 held + KNOB 2 / 3: hard, x3");
-    key(0); check(!dstep_has(&TDRUM->dstep[0], 2), "step 1 again: off");
-    release(B_SEQ); check(ui.layer == LY_PLAY && !on_drum_page(), "SEQ used then let go: no page change");
+          "STEP: step 5 held + KNOB 2 / 3: hard, x3");
+    key(0); check(!dstep_has(&TDRUM->dstep[0], 2), "STEP: step 1 again: off");
+    tap(B_OCTUP); key(1);                             /* OCT+: sounds 9..16; black key 1: snr 2 */
+    check(drum_section == 1 && pen_lane == 8 && song.octave == 0, "STEP: OCT+ the section 9..16, black key 1: snr 2");
+    tap(B_OCTDN); key(5);
+    check(drum_section == 0 && pen_lane == 2, "STEP: OCT- back to 1..8");
+    key(25); check(TDRUM->p[P_DMUTE] == 1 << 2, "STEP: black key 11 leaves the snare out");
+    key(25); check(TDRUM->p[P_DMUTE] == 0, "... and back in");
+    TDRUM->p[P_SLEN] = 32;
+    key(22); check(ui.step_page == 1, "STEP: black key 10, the next page (LEN 32)");
+    key(7); check(dstep_has(&TDRUM->dstep[20], 2), "... its white key 5: step 21");
+    key(20); check(ui.step_page == 0, "STEP: black key 9, the page before");
+    TDRUM->p[P_SLEN] = 16;
+    press(B_SEQ); key(0); release(B_SEQ);             /* SEQ held: the pads while held (a kick, no step) */
+    check(drum_mode == DM_STEP && pen_lane == 0 && !dstep_has(&TDRUM->dstep[0], 0) && !on_drum_page(),
+          "STEP, SEQ held: the pads (kick played, no step, no screen change)");
+    tap(B_SEQ); check(on_drum_page() && drum_mode == DM_STEP, "SEQ tapped on the drum track: its screen (STEP)");
+    ppm("drum-step");
+    tap(B_SEQ); check(drum_mode == DM_LIVE, "SEQ tapped again: LIVE");
+    key(4); check(pen_lane == 2 && !dstep_has(&TDRUM->dstep[2], 2), "LIVE: a white key plays its pad (snare), no step");
+    tap(B_SEQ); check(drum_mode == DM_STEP, "... and back to STEP");
+    go_home(); frame();
 
     /* ---- EDIT: undo / redo, erase, length */
     press(B_EDIT); frames(10);
     edges_btn |= BT(B_OCTDN); fm1_in.buttons |= BT(B_OCTDN); frame(); fm1_in.buttons &= ~BT(B_OCTDN); frame();
-    check(!dstep_has(&TDRUM->dstep[4], 2) && !dstep_has(&TDRUM->dstep[8], 2), "EDIT + OCT-: undo (the SEQ hold's steps gone)");
+    check(!dstep_has(&TDRUM->dstep[20], 2) && dstep_has(&TDRUM->dstep[4], 2) && dstep_has(&TDRUM->dstep[8], 2),
+          "EDIT + OCT-: undo (STEP: the last step entered, step 21, gone)");
     edges_btn |= BT(B_OCTUP); fm1_in.buttons |= BT(B_OCTUP); frame(); fm1_in.buttons &= ~BT(B_OCTUP); frame();
-    check(!dstep_has(&TDRUM->dstep[0], 2) && dstep_lvl(&TDRUM->dstep[4], 2) == LV_HARD, "EDIT + OCT+: redo (back, as left)");
+    check(dstep_has(&TDRUM->dstep[20], 2) && !dstep_has(&TDRUM->dstep[0], 2) && dstep_lvl(&TDRUM->dstep[4], 2) == LV_HARD,
+          "EDIT + OCT+: redo (back, as left)");
     ppm("layer-erase");
     key(4);                                           /* stopped: every snare goes */
     check(!dstep_has(&TDRUM->dstep[4], 2) && !dstep_has(&TDRUM->dstep[8], 2), "EDIT + snare (stopped): every snare erased");
@@ -246,11 +311,15 @@ int main(int argc, char **argv)
     release(B_SCL);
     press(B_GLO); frames(10);
     key(0); check(trk[0].p[P_MUTE] == 1, "GLO + key 1: track 1 muted");
-    key(9); check(song.solo == 2u, "GLO + key 6: track 2 soloed");
+    key(16); check(song.solo == 2u, "GLO + white key 10: track 2 soloed");
+    key(7); check(trk[4].p[P_MUTE] == 1, "GLO + white key 5: track 5 muted");
+    key(7); check(trk[4].p[P_MUTE] == 0, "... and back");
+    check((keys_lit() >> key_of_white(NTRK + 1u) & 1u) && (keys_lit() >> key_of_white(1u) & 1u) &&
+          !(keys_lit() >> key_of_white(4u) & 1u), "GLO LEDs: track 2 soloed (white 10) and heard (white 2), track 5 not");
     ppm("layer-mix");
-    for (i = 0; i < 4u; i++) { fm1_in.notes = 1u << 26; frame(); fm1_in.notes = 0; frames(36); }   /* ~0.6 s apart */
-    check(song.g[G_BPM] >= 95 && song.g[G_BPM] <= 105, "GLO + the last key, tapped at ~0.6 s: ~100 BPM");
-    key(0); key(9);
+    for (i = 0; i < 4u; i++) { fm1_in.notes = 1u << 1; frame(); fm1_in.notes = 0; frames(36); }   /* ~0.6 s apart */
+    check(song.g[G_BPM] >= 95 && song.g[G_BPM] <= 105, "GLO + the first black key, tapped at ~0.6 s: ~100 BPM");
+    key(0); key(16);
     check(!trk[0].p[P_MUTE] && !song.solo, "again: unmuted, no solo");
     release(B_GLO);
     trk[0].p[P_CHORD] = 0;
@@ -298,12 +367,17 @@ int main(int argc, char **argv)
     ui.force = 1; frame(); ppm("page-song");
 
     /* ---- the drum screen */
-    song.sel = TRK_DRUM; studio_open(SC_DRUM); ui.force = 1; frame();
+    song.sel = TRK_DRUM; drum_mode = DM_STEP; studio_open(SC_DRUM); ui.force = 1; frame();
     check(on_drum_page(), "the drum screen");
-    encs[panel.enc[EN_K3]] = 1; frame(); check(dstep_has(&TDRUM->dstep[0], 0), "DRUMS: KNOB 3 adds the kick on step 1");
-    encs[panel.enc[EN_K4]] = -1; frame(); check(dstep_lvl(&TDRUM->dstep[0], 0) == LV_SOFT, "DRUMS: KNOB 4 softer");
-    encs[panel.enc[EN_K1]] = 100; encs[panel.enc[EN_K2]] = 100; frame();
-    check(drum_lane == 15 && drum_cursor == 15, "DRUMS: KNOB 1 / 2 bounded (16 sounds, 16 steps)");
+    encs[panel.enc[EN_K1]] = -100; frame();
+    key(0); fm1_in.notes = 1u; frame();               /* the kick on step 1, held: KNOB 2 softer */
+    encs[panel.enc[EN_K2]] = -1; frame(); fm1_in.notes = 0; frame();
+    check(dstep_has(&TDRUM->dstep[0], 0) && dstep_lvl(&TDRUM->dstep[0], 0) == LV_SOFT, "DRUMS STEP: a step, held + KNOB 2: softer");
+    encs[panel.enc[EN_K1]] = 100; frame();
+    check(pen_lane == 15 && drum_section == 1, "DRUMS STEP: KNOB 1 bounded (16 sounds), the section follows");
+    encs[panel.enc[EN_K4]] = 100; frame();
+    check(TDRUM->p[P_SLEN] == NSTEP, "DRUMS STEP: KNOB 4 the length, bounded");
+    TDRUM->p[P_SLEN] = 16;
     {   /* a scene to look at */
         static const uint8_t BEAT[16] = {0x11, 0x10, 0x10, 0x10, 0x14, 0x10, 0x10, 0x21, 0x11, 0x10, 0x01, 0x10, 0x1C, 0x10, 0x10, 0x20};
         uint32_t j;
@@ -317,10 +391,10 @@ int main(int argc, char **argv)
         }
         for (j = 0; j < 16u; j += 3u) { trk[0].step[j].n = 1; trk[0].step[j].note[0] = 36; trk[0].step[j].time = ST_NOTE; }
         for (j = 0; j < 16u; j += 4u) { trk[1].step[j].n = 3; trk[1].step[j].time = ST_NOTE; }
-        drum_lane = 4; drum_cursor = 6; drum_page = 0; ui.force = 1; ui.msg_t = 0;
+        pen_lane = 4; drum_section = 0; drum_mode = DM_STEP; ui.step_page = 0; ui.force = 1; ui.msg_t = 0;
         drums.hits = 1u | 1u << 4; frame(); ppm("live-grid");
-        drum_page = 1; ui.force = 1; drums.hits = 1u | 1u << 4; frame(); ppm("live-kit");
-        drum_page = 0; song.sel = 1; go_home(); ui.force = 1;
+        drum_mode = DM_LIVE; ui.force = 1; drums.hits = 1u | 1u << 4; frame(); ppm("live-kit");
+        drum_mode = DM_STEP; song.sel = 1; go_home(); ui.force = 1;
         transport_req = 1; frames(30); song.rec = 2u; frame(); ui.force = 1; frame(); ppm("live-tracks");
         song.rec = 0; transport_req = 2; frames(2);
         song.sel = TRK_DRUM;
@@ -365,8 +439,8 @@ int main(int argc, char **argv)
         ft_on = 0; ft_t = 0; memcpy(trk, keep, sizeof keep);
         rec_wait = 0; frame();
     }
-    for (i = 0; i < DRUM_KITS; i++) { TDRUM->p[P_E0] = (int16_t)i; ui.force = 1; drum_page = 1; frame(); }
-    drum_page = 0;
+    for (i = 0; i < DRUM_KITS; i++) { TDRUM->p[P_E0] = (int16_t)i; ui.force = 1; drum_mode = DM_LIVE; frame(); }
+    drum_mode = DM_STEP;
 
     {   /* menu NOTES (PR #11 by @renebohne): sounding synth voices light their keys */
         song.sel = 0; go_home(); ui.force = 1; frame();
@@ -390,12 +464,14 @@ int main(int argc, char **argv)
             char what[96];
             for (k = 0; k < sizeof L / sizeof L[0]; k++) {
                 ui.layer = (uint8_t)L[k].ly;
+                trk[4].p[P_MUTE] = L[k].ly == LY_MIX;    /* (GLO: white 5 = track 5, lit while heard) */
                 if (L[k].lit)
                     ok = (keys_lit() >> 7 & 1u) != 0;
                 else
                     ok = (keys_notes_dim() >> 7 & 1u) != 0 && (keys_lit() >> 7 & 1u) == 0;
                 snprintf(what, sizeof what, "NOTES on, %s layer: the sounding C4 %s", L[k].name, L[k].lit ? "lit" : "glows under the tiles");
                 check(ok, what);
+                trk[4].p[P_MUTE] = 0;
             }
             ui.layer = LY_SCALE;
             check((keys_notes_dim() & scale_keys(0)) == scale_keys(0), "NOTES on, SCL: the scale glows");

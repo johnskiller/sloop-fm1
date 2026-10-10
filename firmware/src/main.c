@@ -105,7 +105,7 @@ static void felucca_init(void)
     for (i = 0; i < NTRK; i++) {
         track_t *t = &trk[i];
         track_defaults(t);
-        if (i < NPART) {
+        if (trk_is_part(i)) {
             set_engine_of(t, TRK_DEF[i][0]);
             apply_preset_to(t, TRK_DEF[i][1]);   /* with its sends */
             t->engine = t->eng_req;
@@ -113,6 +113,7 @@ static void felucca_init(void)
         track_defaults_steps(t);              /* the sequencers start empty */
     }
     TDRUM->p[P_E0] = DRUM_DEFAULT_KIT;        /* the 808 kit */
+    TDRUM->p[P_DMUTE] = 0;                    /* every sound in the pattern */
     song.sel = 0;
     song.master_q12 = 2048;
     autosave_resume();                        /* the project as it was left (project.c) */

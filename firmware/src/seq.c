@@ -9,10 +9,11 @@
  * its LEN. So the tracks, the click, the arp, the rolls and the song arranger never drift apart, a
  * tempo or DIV change plays at most one step a block, and a polymeter (any LEN) stays in phase.
  *
- * Four tracks: tracks 1..3 are synth parts (steps of up to 4 notes), track 4 the drum track (steps
- * of 16 lanes, one per white key). Each step note / lane has a level (ghost .. hard) and a ratchet
- * (x1..x4 hits in its step). The keys play the selected track; MIDI channels 1..3 play parts 1..3,
- * the DRUMS channel (GLO > DRUMS, default 10) the drum track, any other channel the selected track.
+ * Eight tracks: track 4 is the drum track (steps of 16 lanes, one per white key), the others synth
+ * parts (steps of up to 4 notes). Each step note / lane has a level (ghost .. hard) and a ratchet
+ * (x1..x4 hits in its step). The keys play the selected track; MIDI channels 1..3 and 5..8 play
+ * their parts, the DRUMS channel (GLO > DRUMS, default 10) the drum track, any other channel
+ * (4 too) the selected track.
  *
  * Layers: a function button held turns the keys into something else (TE style: hold + touch):
  *   FX   punch-in effects (punch.c)       EDIT  erase that note / sound (while held, as it plays)
@@ -55,7 +56,7 @@ static uint32_t trk_index(const track_t *t) { return (uint32_t)(t - trk); }
 
 static uint32_t trk_midi_ch(uint32_t i)    /* MIDI channel 0..15 of track i (keys -> MIDI out) */
 {
-    if (i < NPART)
+    if (trk_is_part(i))
         return i;
     return song.g[G_DRCH] ? (uint32_t)song.g[G_DRCH] - 1u : 9u;
 }
@@ -83,6 +84,21 @@ static uint32_t layer_now(void)
             return l;
     return LY_PLAY;
 }
+/* the drum track's keys with no layer held (TR style). STEP: the white keys are the 16 steps of sound
+ * pen_lane on page ui.step_page (the UI sets them: LY_DSTEP below), black keys 1..8 pick a sound of the
+ * section (OCT- / OCT+: sounds 1..8 / 9..16) and play it, 9 / 10 turn the page, 11 leaves the sound out of
+ * the pattern (P_DMUTE). LIVE: the 16 sounds are pads, OCT- / OCT+ held ghost / hard. SEQ tapped switches
+ * (ui_input.c layer_tap); SEQ held plays the other mode while held */
+enum { DM_STEP, DM_LIVE };
+static volatile uint8_t drum_mode;               /* DM_STEP at power-on */
+static volatile uint8_t drum_section;            /* black keys 1..8: sounds 1..8 (0) or 9..16 (1) */
+#define LY_DSTEP LY_COUNT                         /* (lk_q: the drum track's STEP keys, run by the UI) */
+static const int8_t BLACK_OF[27] = {-1, 0, -1, 1, -1, 2, -1, -1, 3, -1, 4, -1, -1, 5, -1, 6, -1, 7, -1, -1,
+                                    8, -1, 9, -1, -1, 10, -1};   /* key -> black key 0..10, -1 white */
+static const uint8_t BLACK_KEY[11] = {1, 3, 5, 8, 10, 13, 15, 17, 20, 22, 25};   /* black key -> key */
+static uint32_t drum_live(uint32_t layer) { return (drum_mode == DM_LIVE) ^ (layer == LY_STEP); }
+static uint32_t drum_muted(void) { return (uint16_t)TDRUM->p[P_DMUTE]; }
+
 /* the keys of the layers the UI handles (steps, key, mix): key k down / up, in order */
 #define LKQ 16u
 static volatile uint16_t lk_q[LKQ];
@@ -961,6 +977,25 @@ static void key_down(uint32_t k)
     kb_kind[k] = KS_NONE;
     kb_trk[k] = (uint8_t)sel;
     kb_n[k] = 0;
+    if (is_drum(t) && (layer == LY_PLAY || layer == LY_STEP)) {   /* the drum track: STEP or LIVE (top) */
+        if (!drum_live(layer)) {
+            int32_t b = BLACK_OF[k];
+            if (b >= 0 && b < 8) {                    /* a sound of the section: picked, and heard */
+                pen_lane = (uint8_t)(drum_section * 8u + (uint32_t)b);
+                trk_note_on(t, LANE_NOTE[pen_lane], lvl_vel(LV_NORM, 100));
+                return;
+            }
+            if (b == 10) {                            /* the sound in / out of the pattern */
+                t->p[P_DMUTE] = (int16_t)(drum_muted() ^ (1u << pen_lane));
+                return;
+            }
+            kb_kind[k] = KS_UI;                       /* the steps (white), the page (black 9, 10): the UI's */
+            kb_nt[k][0] = (uint8_t)LY_DSTEP;
+            lk_push(LY_DSTEP, k, 1);
+            return;
+        }
+        layer = LY_PLAY;                              /* LIVE: the pads (also SEQ held in STEP) */
+    }
     switch (layer) {
     case LY_FX: {                                     /* FX held: the white keys pick a punch-in effect */
         int32_t fx = punch_key(k);
@@ -1362,10 +1397,11 @@ static void seq_step(track_t *t, const step_t *s, uint32_t slen, uint32_t skip)
     t->seq_hold = !s->rat && ((s->flags & SF_SLIDE) != 0 || next_tie);   /* next step a TIE: keep the notes to it */
 }
 
-/* play one drum step: each lane a hit (skip: lanes already played by live recording, or rolling) */
+/* play one drum step: each lane a hit (skip: lanes already played by live recording, or rolling; the
+ * sounds left out, P_DMUTE) */
 static void drum_step(track_t *t, const dstep_t *s, uint32_t skip)
 {
-    uint32_t l, m = dstep_mask(s) & ~skip & ~roll_lanes(t);
+    uint32_t l, m = dstep_mask(s) & ~skip & ~roll_lanes(t) & ~drum_muted();
     for (l = 0; m; l++, m >>= 1)
         if (m & 1u)
             trk_note_on(t, LANE_NOTE[l], lvl_vel(dstep_lvl(s, l), 100));
@@ -1377,7 +1413,7 @@ static void seq_ratchets(track_t *t, uint32_t into, uint32_t slen)
     uint32_t i;
     if (is_drum(t)) {
         const dstep_t *s = &t->dstep[t->seq_idx % NSTEP];
-        uint32_t m = dstep_mask(s) & ~roll_lanes(t);
+        uint32_t m = dstep_mask(s) & ~roll_lanes(t) & ~drum_muted();
         for (i = 0; m; i++, m >>= 1) {
             uint32_t hits = 1u + dstep_rat(s, i), h, done;
             if (!(m & 1u) || hits == 1u)
@@ -1464,7 +1500,7 @@ static track_t *midi_track(uint32_t ch)
 {
     if (song.g[G_DRCH] && ch + 1u == (uint32_t)song.g[G_DRCH])
         return TDRUM;
-    return ch < NPART ? &trk[ch] : TSEL;
+    return trk_is_part(ch) ? &trk[ch] : TSEL;     /* channels 1..8: their part (4: the selected track) */
 }
 
 /* a channel that plays the selected track: its note-off goes to the track its note-on went to,
@@ -1473,7 +1509,7 @@ static uint8_t midi_sel_on[16][128];                  /* per channel and note: t
 static track_t *midi_route(uint32_t ch, uint32_t note, int on)
 {
     track_t *t = midi_track(ch);
-    if (ch < NPART || (song.g[G_DRCH] && ch + 1u == (uint32_t)song.g[G_DRCH]))
+    if (trk_is_part(ch) || (song.g[G_DRCH] && ch + 1u == (uint32_t)song.g[G_DRCH]))
         return t;                                     /* a part's own channel, or the drum channel */
     if (on)
         midi_sel_on[ch & 15u][note & 127u] = (uint8_t)(song.sel + 1u);
@@ -1647,7 +1683,7 @@ static void events_block(uint32_t n)
             t->arp_phys = 0;
             t->arp_note = 0;
         }
-        if (i < NPART)
+        if (trk_is_part(i))
             engine_block(t);                          /* engine switch: fade, then switch (voice.c) */
         /* ARP turned off, or HOLD released with no key down: drop the latched chord */
         if ((t->armp && !t->p[P_AMODE]) || (t->aholdp && !t->p[P_AHOLD] && !t->arp_phys)) {
@@ -1688,8 +1724,9 @@ static void events_block(uint32_t n)
         seq_tick(&trk[i], adv);
     click_tick();
     roll_block(adv);
-    for (i = 0; i < NPART; i++)
-        arp_tick(&trk[i], adv);
+    for (i = 0; i < NTRK; i++)
+        if (trk_is_part(i))
+            arp_tick(&trk[i], adv);
     if (song.playing) {
         song.tick++;
         clk_pos += adv;
